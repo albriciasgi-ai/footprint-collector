@@ -359,7 +359,12 @@ class FootprintCollector:
         return footprints
 
     def cleanup_old_files(self) -> int:
-        """Elimina archivos mas antiguos que max_days."""
+        """Elimina archivos mas antiguos que max_days (si max_days=0, no elimina nada)."""
+        # Si max_days es 0, no eliminar nada (mantener todo el historico)
+        if self.max_days == 0:
+            logger.info("Cleanup deshabilitado (max_days=0) - manteniendo todo el historico")
+            return 0
+        
         deleted = 0
         cutoff = datetime.now() - timedelta(days=self.max_days)
 

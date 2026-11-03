@@ -39,7 +39,7 @@ SYMBOLS = os.environ.get("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ADAUSDT").s
 INTERVAL = os.environ.get("INTERVAL", "1")
 
 # Dias maximos a mantener (limpieza automatica)
-MAX_DAYS = int(os.environ.get("MAX_DAYS", "30"))
+MAX_DAYS = int(os.environ.get("MAX_DAYS", "0"))  # 0 = SIN LIMITE (mantener todo el historico)
 
 # Instancia del collector
 collector: Optional[FootprintCollector] = None
@@ -141,7 +141,7 @@ async def health():
 @app.get("/api/footprints/{symbol}")
 async def get_footprints(
     symbol: str,
-    hours: int = Query(default=12, ge=1, le=24*MAX_DAYS, description="Horas de historico"),
+    hours: int = Query(default=12, ge=1, le=24*365,  # Acepta hasta 1 año de historico description="Horas de historico"),
     interval: str = Query(default="1", description="Intervalo de vela")
 ):
     """
