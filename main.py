@@ -16,9 +16,10 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Query, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, FileResponse
 
 from footprint_collector import FootprintCollector
+from tape_recorder import TapeRecorder, DAY_RE
 
 # Configuracion de logging
 logging.basicConfig(
@@ -38,17 +39,23 @@ SYMBOLS = os.environ.get("SYMBOLS", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,ADAUSDT").s
 # Intervalo de footprint (1 minuto por defecto)
 INTERVAL = os.environ.get("INTERVAL", "1")
 
-# Dias maximos a mantener (limpieza automatica)
-MAX_DAYS = int(os.environ.get("MAX_DAYS", "0"))  # 0 = SIN LIMITE (mantener todo el historico)
+# Dias maximos a mantener los footprints (limpieza automatica). 0 = sin limite: se guarda todo
+# el historico (lo que pidio el usuario el 2/11/2026 en la rama deploy de footprint-collector)
+MAX_DAYS = int(os.environ.get("MAX_DAYS", "0"))
+
+# Trades en el formato del almacen de App 1 (.tape): dias a conservar y cada cuanto se guardan
+TAPE_KEEP_DAYS = int(os.environ.get("TAPE_KEEP_DAYS", "30"))
+TAPE_SNAPSHOT_SECONDS = int(os.environ.get("TAPE_SNAPSHOT_SECONDS", "300"))
 
 # Instancia del collector
 collector: Optional[FootprintCollector] = None
+tape: Optional[TapeRecorder] = None
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Gestiona el ciclo de vida de la aplicacion."""
-    global collector
+    global collector, tape
 
     logger.info("=" * 60)
     logger.info("CLOUD FOOTPRINT COLLECTOR - Iniciando")
@@ -66,6 +73,19 @@ async def lifespan(app: FastAPI):
         max_days=MAX_DAYS
     )
 
+    # Grabador de trades (.tape). Si no puede leer las escalas de Bybit, el collector sigue sin el
+    tape = TapeRecorder(SYMBOLS, DATA_DIR, keep_days=TAPE_KEEP_DAYS, snapshot_seconds=TAPE_SNAPSHOT_SECONDS)
+    tape_task = None
+    try:
+        await asyncio.to_thread(tape.load_scales)
+        tape.resume_today()
+        collector.tape = tape
+        tape_task = asyncio.create_task(tape.run())
+        logger.info(f"Grabando trades en {tape.root} (cada {TAPE_SNAPSHOT_SECONDS} s, {TAPE_KEEP_DAYS} dias)")
+    except Exception as e:
+        logger.error(f"No se pudo iniciar el grabador de trades: {e}")
+        tape = None
+
     # Iniciar recoleccion en background
     collector_task = asyncio.create_task(collector.start())
 
@@ -77,6 +97,10 @@ async def lifespan(app: FastAPI):
     # Shutdown
     logger.info("Deteniendo collector...")
     await collector.stop()
+    if tape:
+        if tape_task:
+            tape_task.cancel()
+        await tape.flush()
     collector_task.cancel()
     cleanup_task.cancel()
     logger.info("Collector detenido")
@@ -108,6 +132,10 @@ async def periodic_cleanup():
                 deleted = collector.cleanup_old_files()
                 if deleted > 0:
                     logger.info(f"Limpieza: {deleted} archivos antiguos eliminados")
+            if tape:
+                deleted = tape.cleanup()
+                if deleted > 0:
+                    logger.info(f"Limpieza: {deleted} dias de trades eliminados")
         except asyncio.CancelledError:
             break
         except Exception as e:
@@ -134,14 +162,42 @@ async def health():
         "status": "healthy",
         "timestamp": int(time.time() * 1000),
         "collector_running": collector is not None and collector.running,
-        "stats": stats
+        "stats": stats,
+        "tape": tape.get_stats() if tape else None
     }
+
+
+@app.get("/api/tape/days")
+async def tape_days(symbol: Optional[str] = None):
+    """
+    Dias de trades grabados (.tape) por moneda, con su estado:
+    complete = grabado desde el inicio del dia y sin huecos; gaps = tramos sin datos [inicio, fin] en ms.
+    """
+    if not tape:
+        raise HTTPException(status_code=503, detail="Grabador de trades no iniciado")
+    if symbol and symbol.upper() not in SYMBOLS:
+        raise HTTPException(status_code=404, detail=f"Simbolo {symbol} no esta siendo recolectado")
+    return await asyncio.to_thread(tape.list_days, symbol)
+
+
+@app.get("/api/tape/{symbol}/{day}")
+async def tape_file(symbol: str, day: str):
+    """Archivo .tape de un dia (el dia en curso trae lo guardado hasta el ultimo guardado)."""
+    symbol = symbol.upper()
+    if not tape:
+        raise HTTPException(status_code=503, detail="Grabador de trades no iniciado")
+    if symbol not in SYMBOLS or not DAY_RE.fullmatch(day):
+        raise HTTPException(status_code=404, detail="Simbolo o dia invalido")
+    path = tape.path(symbol, day)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail=f"No hay trades de {symbol} el {day}")
+    return FileResponse(path, media_type="application/octet-stream", filename=path.name)
 
 
 @app.get("/api/footprints/{symbol}")
 async def get_footprints(
     symbol: str,
-    hours: int = Query(default=12, ge=1, le=24*365,  # Acepta hasta 1 año de historico description="Horas de historico"),
+    hours: int = Query(default=12, ge=1, le=24*(MAX_DAYS or 3650), description="Horas de historico"),
     interval: str = Query(default="1", description="Intervalo de vela")
 ):
     """

@@ -91,6 +91,9 @@ class FootprintCollector:
         # Footprint activo por simbolo
         self.active_footprints: Dict[str, ActiveFootprint] = {}
 
+        # Grabador de trades en el formato del almacen (.tape); lo asigna main.py
+        self.tape = None
+
         # Buffer de footprints completados (antes de guardar a disco)
         self.completed_buffer: Dict[str, List[dict]] = defaultdict(list)
         self.buffer_size = 10  # Guardar cada 10 footprints
@@ -327,7 +330,7 @@ class FootprintCollector:
         footprints = []
 
         # Buscar archivos de las fechas relevantes
-        for days_ago in range(min(hours // 24 + 2, self.max_days)):
+        for days_ago in range(hours // 24 + 2 if self.max_days <= 0 else min(hours // 24 + 2, self.max_days)):
             date = now - timedelta(days=days_ago)
             date_str = date.strftime("%Y-%m-%d")
             file_path = symbol_dir / f"{date_str}.json.gz"
@@ -359,13 +362,10 @@ class FootprintCollector:
         return footprints
 
     def cleanup_old_files(self) -> int:
-        """Elimina archivos mas antiguos que max_days (si max_days=0, no elimina nada)."""
-        # Si max_days es 0, no eliminar nada (mantener todo el historico)
-        if self.max_days == 0:
-            logger.info("Cleanup deshabilitado (max_days=0) - manteniendo todo el historico")
-            return 0
-        
+        """Elimina archivos mas antiguos que max_days (0 = sin limite: no borra nada)."""
         deleted = 0
+        if self.max_days <= 0:
+            return 0
         cutoff = datetime.now() - timedelta(days=self.max_days)
 
         for symbol in self.symbols:
@@ -392,7 +392,9 @@ class FootprintCollector:
     def get_stats(self) -> dict:
         """Retorna estadisticas del collector."""
         # Contar footprints en disco
-        disk_count = 0
+        # Solo tamanos: antes descomprimia todos los archivos en cada /health y la consulta
+        # tardaba mas de un minuto
+        disk_files = 0
         disk_size = 0
 
         for symbol in self.symbols:
@@ -400,11 +402,7 @@ class FootprintCollector:
             if symbol_dir.exists():
                 for file_path in symbol_dir.glob("*.json.gz"):
                     disk_size += file_path.stat().st_size
-                    try:
-                        with gzip.open(file_path, 'rt', encoding='utf-8') as f:
-                            disk_count += len(json.load(f))
-                    except:
-                        pass
+                    disk_files += 1
 
         return {
             **self.stats,
@@ -412,7 +410,7 @@ class FootprintCollector:
             "interval": self.interval,
             "buffer_sizes": {s: len(fps) for s, fps in self.completed_buffer.items()},
             "active_footprints": list(self.active_footprints.keys()),
-            "disk_footprints": disk_count,
+            "disk_files": disk_files,
             "disk_size_mb": round(disk_size / (1024 * 1024), 2)
         }
 
@@ -431,6 +429,8 @@ class FootprintCollector:
                 ) as ws:
                     self.stats["connected_since"] = int(time.time() * 1000)
                     logger.info(f"Conectado a Bybit WebSocket")
+                    if self.tape:
+                        self.tape.mark_connected()
 
                     # Suscribirse a trades de todos los simbolos
                     topics = [f"publicTrade.{symbol}" for symbol in self.symbols]
@@ -462,6 +462,8 @@ class FootprintCollector:
 
                             for trade in trades:
                                 self._process_trade(symbol, trade)
+                                if self.tape:
+                                    self.tape.add_trade(symbol, trade)
 
                         except json.JSONDecodeError:
                             pass
@@ -474,6 +476,9 @@ class FootprintCollector:
             except Exception as e:
                 logger.error(f"Error WebSocket: {e}")
                 self.stats["reconnections"] += 1
+            if self.tape:
+                # Desde aqui hasta reconectar no hay trades: queda anotado como hueco del dia
+                self.tape.mark_disconnected()
 
             if self.running:
                 logger.info("Reconectando en 5 segundos...")
