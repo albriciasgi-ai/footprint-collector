@@ -192,7 +192,14 @@ precio fino y el flujo, igual que de un dia oficial. Sirve para los dias que Byb
 
 Probado en el PC con BTC, ETH y XRP: los 18 minutos completos grabados coincidieron exactos con las
 velas de 1 minuto oficiales de Bybit en volumen y cierre, y un reinicio brusco recupero lo guardado y
-anoto el hueco. Falta comparar un dia completo grabado en la nube contra el archivo oficial de Bybit.
+anoto el hueco.
+
+Comparado el 13/11/2026, el primer dia entero de la nube, con `PanelOrderFlow/comparar_nube.py` en BTC, ETH, SOL y XRP:
+- fuera de los minutos que tocan un hueco, la nube es identica al archivo oficial trade por trade, en cada minuto y en cada celda;
+- nunca tiene un trade de mas;
+- lo perdido pasa hasta 9 s el hueco anotado (1 s en la mediana).
+
+Ver `12.AltagraciaTradingSuite/CLAUDE.md`, seccion "Nube contra el archivo oficial".
 
 
 ## Footprints guardados fuera del bucle (12/11/2026)
@@ -246,6 +253,30 @@ anoto el hueco. Falta comparar un dia completo grabado en la nube contra el arch
 - **Despliegue:** copiar a la rama `deploy` de `albriciasgi-ai/footprint-collector` `main.py`, `Dockerfile`, `requirements.txt` (suma httpx), `book_recorder.py` y `book_store.py`.
 
 
+## Hyperliquid (22/11/2026)
+
+**Pedido:** la suite graba Hyperliquid (estado por moneda y posiciones de las ballenas con su precio de liquidación, para el plan on-chain) solo mientras está abierta, y el estudio necesita semanas seguidas. Tiene que ser gratis: va dentro de este servicio, sin pedir más recursos.
+
+- **Qué graba:** el grabador de la suite. `hl_recorder.py` es copia exacta de `12.AltagraciaTradingSuite/server/hl_recorder.py`, y `tests/hl_cloud_checks.py` de la suite comprueba que siga igual. Solo lee la API pública `info` de Hyperliquid y su leaderboard. En `/data/live/hyperliquid/`:
+  - `ctx/`, cada minuto: interés abierto, funding, precios, prima y volumen de cada moneda;
+  - `wallets.json`, una vez al día: unas 1,200 cuentas del leaderboard;
+  - `positions/`, cada 15 minutos: las posiciones de esas cuentas;
+  - `fast/`, cada minuto: las de las cuentas con liquidación a menos de 10% del precio.
+- **Memoria:** la lista de cuentas (~38 MB) se lee por partes. Leída entera pasaba de 250 MB, la mitad del servicio, y los reinicios por memoria del 13/11 ya dejaron huecos en los trades.
+- **Variables nuevas** (sin rehacer la imagen: basta reiniciar):
+  - `HL`: 1 por omisión; 0 lo apaga;
+  - `HL_SYMBOLS`: las de `BOOK_SYMBOLS` por omisión;
+  - `HL_KEEP_DAYS`: 14. Unos 13 MB por día, así que unos 180 MB.
+- **Pedidos:** desde la IP de Northflank, aparte de la del PC: el límite de la API (1,200 de peso por minuto) no se comparte con la suite.
+- **Rutas nuevas:**
+  - `GET /api/hyperliquid/status`, `/api/hyperliquid/ctx/{simbolo}` y `/api/hyperliquid/liqmap/{simbolo}`, como en la suite;
+  - `GET /api/hyperliquid/days`: por carpeta y día, los bytes hasta la última línea entera;
+  - `GET /api/hyperliquid/file/{ctx|positions|fast}/{dia}?offset=`: desde ese byte, hasta 8 MB, solo líneas enteras.
+- **`/health`** suma `hyperliquid`.
+- **En el PC:** `12.AltagraciaTradingSuite/server/hl_cloud.py` baja cada 10 minutos lo nuevo de cada archivo a `OrderFlowData/live/hyperliquid_cloud`.
+- **Despliegue:** copiar a la rama `deploy` de `albriciasgi-ai/footprint-collector` `main.py`, `Dockerfile` y `hl_recorder.py`, y "Deploy" en Builds.
+
+
 ## Trades sumados al final del día, sin quedarse sin memoria (13/11/2026)
 
 **Problema:** al ir a desplegar el libro, Northflank mostraba el servicio con 4 reinicios en un día, el último "Out-of-Memory killed (OOMKilled)". Fueron hoy a las 12:51, 13:34 y 14:58 de Colombia, todos por la tarde UTC. El plan es `nf-compute-20`: 0.2 vCPU y 512 MB. Cada reinicio deja un hueco en los trades.
@@ -262,3 +293,17 @@ anoto el hueco. Falta comparar un dia completo grabado en la nube contra el arch
   - el día real de BTC, si está en el PC.
 
   `tape_checks.py` sigue con 18 de 22. Las 4 que fallan ya fallaban antes: usan el 12/11 como día en curso.
+
+**Desplegado el 13/11:** build `composed-eggnog-3952` (commit fe7d3bf de la rama `deploy`, con el libro completo), con el botón "Deploy" desde el navegador integrado y la sesión del usuario.
+
+**Medido después**, en los primeros 10 minutos:
+- **Servicio:** 0 reinicios. Memoria 167 MB y CPU 0.027 vCPU (14% del plan), contra 226 MB y 0.044 vCPU (22%) de la versión anterior, que no tenía el libro.
+- **Libro:** las 20 monedas listas, cada foto en 3.4 a 8.1 s; TONUSDT fuera, sin huecos ni errores.
+- **Primer guardado de trades con `append_tape`:** las 20 monedas, sin errores. Los archivos de LPT, PAXG y BTC bajados de la nube se leen bien, están ordenados y empiezan con los mismos trades que el PC tenía de las 15:14.
+- **Descargas:** BTC (4.3 MB) en 6.7 s, unos 620 KB/s; antes, de 15 a 40 KB/s. `/health` responde en 0.7 s.
+- **Desde la suite:** `book_cloud.py` bajó de la nube real 5 minutos completos de BTC en 1 s, a una carpeta temporal. La segunda vuelta no bajó nada.
+- **Huecos de los reinicios de hoy**, que siguen anotados en los archivos de la nube:
+  - 10:13, 12:46, 13:28 y 14:53 de Colombia, de unos 5 minutos cada uno: lo que iba desde el último guardado;
+  - el despliegue dejó uno de 1 minuto.
+
+  El PC los tapa con lo que grabó la suite.
