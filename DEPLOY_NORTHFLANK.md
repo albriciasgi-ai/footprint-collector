@@ -276,6 +276,33 @@ Ver `12.AltagraciaTradingSuite/CLAUDE.md`, seccion "Nube contra el archivo ofici
 - **En el PC:** `12.AltagraciaTradingSuite/server/hl_cloud.py` baja cada 10 minutos lo nuevo de cada archivo a `OrderFlowData/live/hyperliquid_cloud`.
 - **Despliegue:** copiar a la rama `deploy` de `albriciasgi-ai/footprint-collector` `main.py`, `Dockerfile` y `hl_recorder.py`, y "Deploy" en Builds.
 
+**Desplegado el 22/11:** build `clear-muscle-9783` (commit 0db5b61 de la rama `deploy`), con el botón "Deploy" desde el navegador integrado y la sesión del usuario.
+- **Antes de reiniciar**, tras 8 días encendido sin reinicios: 362 de 512 MB y 19% de la CPU. Al desplegar el 13/11 estaba en 167 MB. Habrá que mirar si la memoria vuelve a subir así.
+- **Después:** 181 MB y 31% de la CPU durante la primera vuelta de Hyperliquid.
+  - la lista de cuentas (46,409 filas, 1,217 cuentas) bajó en segundos desde el datacenter;
+  - la vuelta completa tardó 226 s, con las 1,217 cuentas y 1,009 posiciones;
+  - el libro siguió con sus 20 monedas.
+- **La página de Northflank** tardó unos 3 minutos en cargar, porque su archivo principal baja a unos 25 KB/s. Una dirección escrita a mano la vuelve a cargar entera: conviene moverse con clics dentro de la página.
+
+
+## Memoria que glibc no devuelve (23/11/2026)
+
+**Pedido:** revisar la memoria del collector. El 23/11, un día después de desplegar Hyperliquid, usaba 348 de 512 MB.
+
+**Lo visto en Northflank:** tras cada reinicio la memoria sube de forma pareja unas 12 a 24 horas y después se aplana. La instancia anterior hizo lo mismo antes de Hyperliquid: 167 MB al desplegarla el 13/11, y entre 340 y 370 MB durante días. Hyperliquid no cambió la curva.
+
+**Medido en el PC** (media hora, las 21 monedas, sin Hyperliquid, con tracemalloc):
+- lo que ocupan los objetos de Python se queda plano en unos 50 MB, casi todo el libro;
+- el proceso, en cambio, sube de 283 a 331 MB.
+
+No son datos que se acumulen: es memoria que el asignador de glibc retiene después de que Python la libera (fragmentación).
+
+**Cambio** (`main.py`):
+- cada `MEM_TRIM_SECONDS` (600 de fábrica; 0 lo apaga) hace `gc.collect()` y `malloc_trim(0)`, que devuelve al sistema lo que glibc tiene libre. Fuera de Linux no hace nada;
+- `/health` suma `memory`: la memoria residente del proceso (`VmRSS`), cuántas veces se devolvió, cuánto en total y la última.
+
+**Pruebas:** `tests/mem_checks.py` (5), con un libc falso. `malloc_trim` solo existe en Linux: el efecto real se mide en Northflank.
+
 
 ## Trades sumados al final del día, sin quedarse sin memoria (13/11/2026)
 
